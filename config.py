@@ -11,6 +11,10 @@ if not TELEGRAM_TOKEN:
 # Payment Configuration
 TICKET_PRICE = int(os.getenv('TICKET_PRICE', 1111))
 
+# ЮKassa
+YOOKASSA_SHOP_ID = os.getenv('YOOKASSA_SHOP_ID')
+YOOKASSA_SECRET_KEY = os.getenv('YOOKASSA_SECRET_KEY')
+
 # Google Sheets Configuration
 SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
 GOOGLE_SERVICE_ACCOUNT = os.getenv('GOOGLE_SERVICE_ACCOUNT')

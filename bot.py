@@ -3,13 +3,21 @@ import re
 import uuid
 import json
 import asyncio
+import hashlib
+import hmac
 from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import gspread
 from google.oauth2.service_account import Credentials
+import aiohttp
+import yookassa
+from yookassa import Payment
 from config import *
 
+# Безопасная инициализация ЮKassa
+yookassa.Configuration.account_id = YOOKASSA_SHOP_ID
+yookassa.Configuration.secret_key = YOOKASSA_SECRET_KEY
 # Logging configuration
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -39,7 +47,7 @@ class MatrixBot:
                 if not self.sheet.cell(1, 1).value:
                     self.sheet.append_row([
                         'User ID', 'Username', 'Имя покупателя', 'Телефон', 
-                        'Количество билетов', 'Сумма', 'Дата регистрации', 'Статус оплаты'
+                        'Количество билетов', 'Сумма', 'Дата регистрации', 'Статус оплаты', 'Payment ID'
                     ])
                 logger.info("Google Sheets инициализирован успешно")
             else:
@@ -89,7 +97,7 @@ class MatrixBot:
         try:
             records = self.sheet.get_all_records()
             for record in records:
-                if str(record.get('User ID', '')) == str(user_id):
+                if str(record.get('User ID', '')) == str(user_id) and str(record.get('Статус оплаты', '')) == 'Оплачено':
                     return True
             return False
         except Exception as e:
@@ -148,7 +156,8 @@ class MatrixBot:
             
             elif query.data.startswith('pay_'):
                 # Обработка оплаты
-                await self.process_payment(update, context)
+                payment_id = query.data.split('_')[1]
+                await self.process_payment(update, context, payment_id)
             
             elif query.data == 'confirm_payment':
                 # Подтверждение оплаты
@@ -244,7 +253,7 @@ class MatrixBot:
                 "Для оплаты нажмите кнопку ниже:"
             )
             
-            keyboard = [[InlineKeyboardButton("💳 Оплатить", callback_data=f'pay_{payment_id}')]]
+            keyboard = [[InlineKeyboardButton("💳 Оплатить через ЮKassa", callback_data=f'pay_{payment_id}')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await update.message.reply_text(order_text, parse_mode='HTML', reply_markup=reply_markup)
@@ -252,42 +261,110 @@ class MatrixBot:
             logger.error(f"Ошибка в show_payment_button: {e}")
             await update.message.reply_text("⚠️ Произошла ошибка при создании заказа.")
     
-    async def process_payment(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка оплаты"""
+    async def process_payment(self, update: Update, context: ContextTypes.DEFAULT_TYPE, payment_id):
+        """Обработка оплаты через ЮKassa"""
         try:
             query = update.callback_query
-            callback_data = query.data  # Получаем данные из callback
-            
-            payment_id = callback_data.split('_')[1]
             
             total_amount = context.user_data.get('total_amount', 0)
+            user_data = {
+                'name': context.user_data.get('name', ''),
+                'phone': context.user_data.get('phone', ''),
+                'ticket_count': context.user_data.get('ticket_count', 1)
+            }
             
-            # Эмуляция страницы оплаты ЮKassa
+            # Создаем платеж через ЮKassa
+            payment = Payment.create({
+                "amount": {
+                    "value": str(total_amount),
+                    "currency": "RUB"
+                },
+                "confirmation": {
+                    "type": "redirect",
+                    "return_url": "https://t.me/your_bot_username"  # Замените на ваш URL
+                },
+                "capture": True,
+                "description": f"Оплата за участие в игре 'Выход из Матрицы'. Билетов: {user_data['ticket_count']}",
+                "metadata": {
+                    "payment_id": payment_id,
+                    "user_id": str(query.from_user.id),
+                    "name": user_data['name'],
+                    "phone": user_data['phone'],
+                    "ticket_count": str(user_data['ticket_count'])
+                }
+            })
+            
+            # Сохраняем ID платежа ЮKassa
+            context.user_data['yookassa_payment_id'] = payment.id
+            
+            # Сохраняем предварительные данные в Google Sheets со статусом "Ожидание оплаты"
+            if self.sheet:
+                self.sheet.append_row([
+                    query.from_user.id,
+                    query.from_user.username or '',
+                    user_data['name'],
+                    user_data['phone'],
+                    user_data['ticket_count'],
+                    f"{total_amount} руб.",
+                    datetime.now().strftime("%d.%m.%Y %H:%M"),
+                    "Ожидание оплаты",
+                    payment_id
+                ])
+            
+            # Создаем кнопку для перехода к оплате
             payment_text = (
                 "💳 <b>Оплата через ЮKassa</b>\n\n"
-                "Демонстрация интеграции с платежной системой:\n\n"
                 f"🛒 Сумма к оплате: <b>{total_amount} руб.</b>\n"
                 f"🆔 Номер заказа: <code>{payment_id}</code>\n"
-                f"🏪 Магазин: Выход из Матрицы\n\n"
-                "Нажмите кнопку ниже для подтверждения оплаты:"
+                f"🏪 Магазин: Большая Трансформационная Игра\n\n"
+                "Нажмите кнопку ниже для перехода к оплате:"
             )
             
             keyboard = [
-                [InlineKeyboardButton("✅ Подтвердить оплату", callback_data='confirm_payment')],
+                [InlineKeyboardButton("💳 Перейти к оплате", url=payment.confirmation.confirmation_url)],
+                [InlineKeyboardButton("✅ Проверить оплату", callback_data=f'check_payment_{payment_id}')],
                 [InlineKeyboardButton("❌ Отменить", callback_data='cancel_payment')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await query.edit_message_text(payment_text, parse_mode='HTML', reply_markup=reply_markup)
+            
         except Exception as e:
             logger.error(f"Ошибка в process_payment: {e}")
             try:
-                await update.callback_query.answer("⚠️ Ошибка при обработке оплаты.", show_alert=True)
+                await update.callback_query.answer("⚠️ Ошибка при создании платежа.", show_alert=True)
             except:
                 pass
     
-    async def confirm_payment(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Подтверждение оплаты"""
+    async def check_payment_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE, payment_id):
+        """Проверка статуса платежа"""
+        try:
+            query = update.callback_query
+            
+            yookassa_payment_id = context.user_data.get('yookassa_payment_id')
+            if not yookassa_payment_id:
+                await query.answer("⚠️ Платеж не найден", show_alert=True)
+                return
+            
+            # Получаем статус платежа из ЮKassa
+            payment = Payment.find_one(yookassa_payment_id)
+            
+            if payment.status == 'succeeded':
+                # Платеж успешен
+                await self.confirm_payment_success(update, context, payment_id)
+            elif payment.status == 'canceled':
+                # Платеж отменен
+                await self.cancel_payment(update, context)
+            else:
+                # Платеж в процессе
+                await query.answer("⏳ Платеж еще не подтвержден. Пожалуйста, дождитесь подтверждения оплаты.", show_alert=True)
+                
+        except Exception as e:
+            logger.error(f"Ошибка при проверке статуса платежа: {e}")
+            await query.answer("⚠️ Ошибка при проверке статуса платежа", show_alert=True)
+    
+    async def confirm_payment_success(self, update: Update, context: ContextTypes.DEFAULT_TYPE, payment_id):
+        """Подтверждение успешной оплаты"""
         try:
             query = update.callback_query
             user_data = {
@@ -297,21 +374,20 @@ class MatrixBot:
                 'phone': context.user_data.get('phone', ''),
                 'ticket_count': context.user_data.get('ticket_count', 1),
                 'total_amount': context.user_data.get('total_amount', 0),
-                'payment_id': context.user_data.get('payment_id', '')
+                'payment_id': payment_id
             }
             
-            # Сохраняем данные в Google Sheets
+            # Обновляем статус в Google Sheets
             if self.sheet:
-                self.sheet.append_row([
-                    user_data['user_id'],
-                    user_data['username'],
-                    user_data['name'],
-                    user_data['phone'],
-                    user_data['ticket_count'],
-                    f"{user_data['total_amount']} руб.",
-                    datetime.now().strftime("%d.%m.%Y %H:%M"),
-                    "Оплачено"
-                ])
+                try:
+                    records = self.sheet.get_all_records()
+                    for i, record in enumerate(records, start=2):  # начинаем с 2, так как первая строка - заголовки
+                        if str(record.get('Payment ID', '')) == str(payment_id):
+                            # Обновляем статус оплаты
+                            self.sheet.update_cell(i, 8, "Оплачено")  # Столбец "Статус оплаты"
+                            break
+                except Exception as e:
+                    logger.error(f"Ошибка обновления статуса в Google Sheets: {e}")
                 
                 # Сообщение об успешной оплате
                 success_text = (
@@ -334,7 +410,7 @@ class MatrixBot:
             else:
                 await query.edit_message_text("⚠️ Ошибка подключения к базе данных!")
         except Exception as e:
-            logger.error(f"Ошибка в confirm_payment: {e}")
+            logger.error(f"Ошибка в confirm_payment_success: {e}")
             try:
                 await update.callback_query.edit_message_text("⚠️ Ошибка при подтверждении оплаты.")
             except:
@@ -342,6 +418,10 @@ class MatrixBot:
         finally:
             # Сбрасываем состояние
             context.user_data.clear()
+    
+    async def confirm_payment(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Подтверждение оплаты (для обратной совместимости)"""
+        await self.confirm_payment_success(update, context, context.user_data.get('payment_id', ''))
     
     async def cancel_payment(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Отмена оплаты"""
@@ -368,10 +448,32 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await matrix_bot.start(update, context)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await matrix_bot.button(update, context)
+    query_data = update.callback_query.data
+    
+    if query_data.startswith('check_payment_'):
+        payment_id = query_data.split('_')[2]
+        await matrix_bot.check_payment_status(update, context, payment_id)
+    else:
+        await matrix_bot.button(update, context)
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await matrix_bot.handle_message(update, context)
 
 async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await matrix_bot.cancel(update, context)
+
+def main():
+    """Основная функция для запуска бота"""
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Добавляем обработчики
+    application.add_handler(CommandHandler("start", start_handler))
+    application.add_handler(CommandHandler("cancel", cancel_handler))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    
+    # Запускаем бота
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
