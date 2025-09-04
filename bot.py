@@ -10,7 +10,6 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import gspread
 from google.oauth2.service_account import Credentials
-import aiohttp
 import yookassa
 from yookassa import Payment
 from config import *
