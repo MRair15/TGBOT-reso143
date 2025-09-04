@@ -1,5 +1,6 @@
-python-telegram-bot
+python-telegram-bot==20.9
 gspread
 google-auth
-python-dotenv
 aiohttp
+yookassa
+pycryptodome
