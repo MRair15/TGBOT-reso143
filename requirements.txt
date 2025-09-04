@@ -2,3 +2,4 @@ python-telegram-bot
 gspread
 google-auth
 python-dotenv
+aiohttp
