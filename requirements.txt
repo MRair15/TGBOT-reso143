@@ -1,6 +1,6 @@
 python-telegram-bot==20.9
 gspread
 google-auth
-aiohttp
+aiohttp>=3.9.0
 yookassa
 pycryptodome
